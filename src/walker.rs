@@ -28,9 +28,13 @@ pub fn collect(
     max_size: u64,
     no_ignore: bool,
     force: Option<Profile<'static>>,
+    excluded: Option<&Path>,
 ) -> Result<Collection, std::io::Error> {
     let mut col = Collection::default();
     for p in paths {
+        if excluded.is_some_and(|root| p.canonicalize().is_ok_and(|p| p.starts_with(root))) {
+            continue;
+        }
         let meta = std::fs::metadata(p)
             .map_err(|e| std::io::Error::new(e.kind(), format!("{}: {e}", p.display())))?;
         if meta.is_file() {
@@ -38,17 +42,16 @@ pub fn collect(
             let profile = match force {
                 Some(p) => p,
                 None => profile::by_extension(extension_of(p)).unwrap_or_else(|| {
-                    col.skipped
-                        .push((p.clone(), "unknown extension -> forced c_family".into()));
+                    eprintln!(
+                        "alpp: {}: unknown extension -> forced c_family",
+                        p.display()
+                    );
                     profile::C_FAMILY
                 }),
             };
-            col.jobs.push(FileJob {
-                path: p.clone(),
-                profile,
-            });
+            collect_file(p, &meta, profile, max_size, &mut col)?;
         } else if meta.is_dir() {
-            collect_dir(p, max_size, no_ignore, force, &mut col)?;
+            collect_dir(p, max_size, no_ignore, force, excluded, &mut col)?;
         }
     }
     Ok(col)
@@ -59,6 +62,7 @@ fn collect_dir(
     max_size: u64,
     no_ignore: bool,
     force: Option<Profile<'static>>,
+    excluded: Option<&Path>,
     col: &mut Collection,
 ) -> Result<(), std::io::Error> {
     let mut builder = ignore::WalkBuilder::new(dir);
@@ -66,6 +70,15 @@ fn collect_dir(
         .hidden(true)
         .git_ignore(!no_ignore)
         .git_global(!no_ignore);
+    if let Some(root) = excluded {
+        let root = root.to_path_buf();
+        builder.filter_entry(move |entry| {
+            !entry
+                .path()
+                .canonicalize()
+                .is_ok_and(|p| p.starts_with(&root))
+        });
+    }
     for entry in builder.build() {
         let entry = entry.map_err(|e| std::io::Error::other(e.to_string()))?;
         let path = entry.path();
@@ -83,21 +96,28 @@ fn collect_dir(
                 }
             },
         };
-        let Ok(meta) = std::fs::metadata(path) else {
-            col.passthrough.push(path.to_path_buf());
-            continue;
-        };
-        if meta.len() > max_size {
-            col.skipped.push((
-                path.to_path_buf(),
-                format!("file too large (> {max_size}B)"),
-            ));
-            continue;
-        }
-        if is_binary(path) {
-            col.skipped.push((path.to_path_buf(), "binary file".into()));
-            continue;
-        }
+        let meta = std::fs::metadata(path)?;
+        collect_file(path, &meta, profile, max_size, col)?;
+    }
+    Ok(())
+}
+
+/// 显式文件和目录发现的文件共用过滤规则。
+fn collect_file(
+    path: &Path,
+    meta: &std::fs::Metadata,
+    profile: Profile<'static>,
+    max_size: u64,
+    col: &mut Collection,
+) -> std::io::Result<()> {
+    if meta.len() > max_size {
+        col.skipped.push((
+            path.to_path_buf(),
+            format!("file too large (> {max_size}B)"),
+        ));
+    } else if is_binary(path)? {
+        col.skipped.push((path.to_path_buf(), "binary file".into()));
+    } else {
         col.jobs.push(FileJob {
             path: path.to_path_buf(),
             profile,
@@ -111,12 +131,10 @@ fn extension_of(p: &Path) -> &str {
 }
 
 /// 头部 8KB 含 NUL 视为二进制（与 git 判定一致）。
-fn is_binary(path: &Path) -> bool {
+fn is_binary(path: &Path) -> std::io::Result<bool> {
     use std::io::Read;
-    let Ok(mut f) = std::fs::File::open(path) else {
-        return false;
-    };
+    let mut f = std::fs::File::open(path)?;
     let mut head = [0u8; 8192];
-    let n = f.read(&mut head).unwrap_or(0);
-    head[..n].contains(&0)
+    let n = f.read(&mut head)?;
+    Ok(head[..n].contains(&0))
 }

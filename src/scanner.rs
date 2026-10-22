@@ -1,13 +1,7 @@
 //! 行扫描与指令识别（MACRO_SPEC §2 词法，DESIGN §4.4）。
 //!
-//! 热路径两级过滤：
-//!
-//! 1. `memchr` 在整块缓冲区上定位前缀锚字节（SIMD：SSE2/AVX2/NEON 运行时派发），
-//!    无锚字节的行直接判为普通代码行；
-//! 2. 命中行做精确前缀/关键字确认。
-//!
-//! 这里把两级放在同一入口 `scan_block`：先在块级用 memchr 预筛含锚字节的行区间，
-//! 再逐行精确判定。
+//! 生产入口 iter_lines 使用 memchr 定位换行，classify 校验行首前缀和精确关键字。
+//! lines_with_anchor 保留为锚字节预筛的基准入口，尚未接入处理流水线。
 
 use crate::profile::Profile;
 use memchr::memchr_iter;
@@ -142,10 +136,10 @@ pub fn classify<'a>(
     let prefix_col = indent; // 列号（0-based）用于诊断
     let body = &rest[profile.prefix.len()..];
 
-    // 提取关键字：紧随前缀的 [A-Za-z]+（关键字与前缀之间不允许空白，SPEC §2.1）
+    // 按水平空白分词，禁止把 define_X、if(1) 等拆成合法指令和参数。
     let kw_len = body
         .iter()
-        .take_while(|&&b| b.is_ascii_alphabetic())
+        .take_while(|&&b| b != b' ' && b != b'\t')
         .count();
     let keyword = &body[..kw_len];
     let args_raw = &body[kw_len..];

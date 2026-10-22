@@ -1,0 +1,9 @@
+--- a/input.js
++++ b/input.js
+@@ -1,5 +1,2 @@
+ head();
+-//#ifdef FLAG
+-debug();
+-//#endif
+ tail();
+\ No newline at end of file

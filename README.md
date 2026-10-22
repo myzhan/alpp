@@ -1,6 +1,6 @@
 # ALPP — Any Language PreProcessor
 
-用注释内嵌的 `#ifdef` 风格指令，为没有原生条件编译的语言（Java/Python/Lua/Shell 等）提供 C 宏式的条件编译。指令写在注释里，开发树无需任何工具即可通过编译、lint 与 IDE 检查；发布构建时用 alpp 按宏定义裁剪代码块。
+用注释内嵌的 `#ifdef` 风格指令，为没有原生条件编译的语言（Java/Python/Lua/Shell 等）提供 C 宏式的条件编译。指令本身是普通注释，作者需保证开发树及各宏组合裁剪结果的语法合法；发布构建时用 alpp 按宏定义裁剪代码块。
 
 示例（Lua，剥离调试日志）：
 
@@ -46,7 +46,7 @@ end
 cargo install --git https://github.com/myzhan/alpp
 ```
 
-或从 [Releases](https://github.com/myzhan/alpp/releases) 下载对应平台的二进制（linux/macos/windows × x86_64/aarch64）。
+或从 [Releases](https://github.com/myzhan/alpp/releases) 下载对应平台的二进制（Linux/macOS：x86_64、aarch64；Windows：x86_64）。
 
 ## 用法
 
@@ -55,7 +55,7 @@ alpp [OPTIONS] [PATH]...          # 默认 dry-run：输出 unified diff，不�
 alpp -w -DRELEASE ./src           # 按宏裁剪并写回
 alpp -w -o out -DRELEASE ./src    # 写到镜像目录（含未处理的二进制等，原样复制）
 alpp --check ./src                # 只校验指令合法性（CI 用）
-alpp --gate ./dist                # 发布门禁：树中残留指令则退出 3
+alpp --gate ./dist                # 发布门禁：扫描文件中残留指令则退出 3
 ```
 
 常用选项：`-D NAME[=VAL]` / `-U NAME` 定义与取消宏；`-P c_family|hash|lua` 强制 Profile；`--prefix` 自定义指令前缀；`-j N` 并行度；`--strict` 把可疑指令升级为错误。
@@ -67,6 +67,8 @@ alpp --gate ./dist                # 发布门禁：树中残留指令则退出 3
 九条指令，与 C 预处理器同形：`#ifdef` `#ifndef` `#if` `#elif` `#else` `#endif` `#define` `#undef` `#error`。前缀按语言注释形态确定（见下表），允许任意缩进。
 
 表达式支持 `defined(X)`、数值比较（`> >= < <= == !=`）、逻辑运算（`&& || !`）与括号；未定义标识符按 `0` 求值。注意**没有** `and`/`or`/`not` 文字运算符。字符串字面量内的指令样文本自动豁免，不会被误删。
+
+文件起始的 UTF-8 BOM 不影响首行指令识别；若首行为指令，BOM 随整行删除。`#else` 后不能再出现同层 `#elif`（E2）；括号与 `!` 的累计嵌套上限为 128 层（超限 E7）。
 
 ## 支持的语言
 
@@ -97,7 +99,15 @@ deny = ["if", "elif", "define", "undef", "error"]   # 限制可用的指令；de
 
 - Rust 实现，单二进制；除被裁剪区间外任何字节原样保留（`\r\n`/tab/BOM/多字节字符不归一化），写回走临时文件 + 原子 rename
 - SIMD 行扫描（memchr，SSE2/AVX2/NEON）+ rayon 文件级并行；单线程吞吐 2.2–2.6 GiB/s（`cargo bench` 可复现）
-- dry-run 的 diff 可直接管道给 `git apply`；输出不随并行度变化
+- 在项目内使用相对输入路径时，dry-run 的 diff 保留原始正文并转义路径，可管道给 `git -c core.autocrlf=false -c core.eol=lf apply`；输出不随并行度变化
+
+## 镜像与批量处理
+
+`alpp -w -o out ./src` 将已处理文件和未处理资产写入镜像。CWD 内输入保留相对目录结构；外部目录映射内部结构，外部单文件映射文件名。输出目录自动排除，路径冲突或越界在写盘前失败；预检包含输出文件系统上的大小写等价和文件/目录冲突。写回保留源权限，使用唯一临时文件。
+
+`--check`/`--gate` 不生成改写内容；批量处理按线程数分批释放结果。显式文件同样受二进制检测和大小上限约束，`--prefix` 支持目录内未知扩展名且不能为空。
+
+`--gate` 共用文件过滤规则，只保证实际扫描文件无残留；隐藏/忽略文件、未知扩展名及二进制/超限文件仍可能未检查。可按需调整 Profile、前缀和大小上限，或显式指定文件；`--verbose` 显示二进制/超限跳过原因。
 
 ## 文档
 

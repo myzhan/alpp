@@ -76,10 +76,14 @@ impl EvalError {
     }
 }
 
+// 限制括号与 ! 的累计嵌套，超深输入走 E7，避免递归耗尽线程栈。
+const MAX_EXPR_DEPTH: usize = 128;
+
 struct Parser<'t> {
     src: &'t [u8],
     pos: usize,
     macros: &'t MacroTable,
+    depth: usize,
 }
 
 /// 求值表达式，返回整数值（调用方按“非零为真”解释）。
@@ -88,6 +92,7 @@ pub fn eval_expr(src: &[u8], macros: &MacroTable) -> Result<i64, EvalError> {
         src,
         pos: 0,
         macros,
+        depth: 0,
     };
     let v = p.parse_or()?;
     p.skip_ws();
@@ -174,11 +179,21 @@ impl<'t> Parser<'t> {
         }
     }
 
+    fn enter_nested(&mut self) -> Result<(), EvalError> {
+        if self.depth == MAX_EXPR_DEPTH {
+            return Err(self.err("expression nesting exceeds 128 levels"));
+        }
+        self.depth += 1;
+        Ok(())
+    }
+
     fn parse_unary(&mut self) -> Result<i64, EvalError> {
         self.skip_ws();
         if self.eat(b"!") {
-            let v = self.parse_unary()?;
-            return Ok(i64::from(v == 0));
+            self.enter_nested()?;
+            let v = self.parse_unary();
+            self.depth -= 1;
+            return Ok(i64::from(v? == 0));
         }
         self.parse_primary()
     }
@@ -189,7 +204,10 @@ impl<'t> Parser<'t> {
             None => Err(self.err("unexpected end of expression")),
             Some(b'(') => {
                 self.pos += 1;
-                let v = self.parse_or()?;
+                self.enter_nested()?;
+                let v = self.parse_or();
+                self.depth -= 1;
+                let v = v?;
                 if !self.eat(b")") {
                     return Err(self.err("expected ')'"));
                 }

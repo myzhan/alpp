@@ -151,7 +151,45 @@ fn bench_parallel(c: &mut Criterion) {
     group.finish();
 }
 
+/// 包含遍历、读盘、状态机和 stdout 的真实 CLI 基准；文件准备不计入耗时。
+fn bench_cli(c: &mut Criterion) {
+    use std::process::{Command, Stdio};
+    let root = tempfile::tempdir().unwrap();
+    let mut input = std::fs::read("tests/fixtures/ts/regressions/input.js").unwrap();
+    input.push(b'\n');
+    let input = input.repeat(4096);
+    for i in 0..64 {
+        std::fs::write(root.path().join(format!("f{i:02}.js")), &input).unwrap();
+    }
+    let mut group = c.benchmark_group("cli/tree");
+    group.throughput(Throughput::Bytes(64 * input.len() as u64));
+    group.sample_size(10);
+    for mode in ["check", "diff"] {
+        group.bench_function(mode, |b| {
+            b.iter(|| {
+                let mut command = Command::new(env!("CARGO_BIN_EXE_alpp"));
+                command
+                    .args(["--no-config", "-j", "1", "."])
+                    .current_dir(root.path())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                if mode == "check" {
+                    command.arg("--check");
+                }
+                assert!(command.status().unwrap().success());
+            })
+        });
+    }
+    group.finish();
+}
+
 use rayon::prelude::*;
 
-criterion_group!(benches, bench_full_process, bench_scan_only, bench_parallel);
+criterion_group!(
+    benches,
+    bench_full_process,
+    bench_scan_only,
+    bench_parallel,
+    bench_cli
+);
 criterion_main!(benches);

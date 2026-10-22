@@ -35,7 +35,7 @@ struct Frame {
     open_line: usize,
 }
 
-/// 处理一个完整文件字节缓冲（M1 整文件驻留；分块读入是 M3 优化，DESIGN §4.4.3）。
+/// 处理一个完整文件字节缓冲并返回改写内容（DESIGN §4.4）。
 ///
 /// `config`：`.alpp` 指令语法管控（[directives] deny/allow），违规报 E8——无论指令所在分支
 /// 是否活跃（管控语义，出现即违规；与 E5 的“活跃才触发”不同，SPEC §10）。
@@ -47,6 +47,32 @@ pub fn process_bytes(
     strict: bool,
     config: &Config,
 ) -> Result<Outcome, FileError> {
+    let analysis = analyze_bytes(bytes, path, profile, macros, strict, config)?;
+    let output = analysis.rewrite(bytes);
+    Ok(Outcome {
+        output,
+        deleted_lines: analysis.deleted_lines,
+        directive_lines: analysis.directive_lines,
+    })
+}
+
+/// 校验与删除计划；CLI 的 check/gate/diff 不需要生成改写缓冲区。
+#[derive(Debug)]
+pub struct Analysis {
+    pub deleted_lines: Vec<usize>,
+    pub directive_lines: Vec<usize>,
+    deleted_ranges: Vec<std::ops::Range<usize>>,
+}
+
+/// 复用同一状态机进行校验，不复制保留行。
+pub fn analyze_bytes(
+    bytes: &[u8],
+    path: &Path,
+    profile: &Profile,
+    macros: &MacroTable,
+    strict: bool,
+    config: &Config,
+) -> Result<Analysis, FileError> {
     let err = |line: usize, code: u8, message: String| FileError {
         path: path.display().to_string(),
         line,
@@ -54,16 +80,24 @@ pub fn process_bytes(
         message,
     };
 
-    let mut out = Vec::with_capacity(bytes.len());
     let mut deleted_lines = Vec::new();
+    // 合并连续删除字节，写回无需再次逐行扫描；空计划不分配。
+    let mut deleted_ranges: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut delete = |line: &crate::scanner::Line<'_>| {
+        deleted_lines.push(line.no);
+        match deleted_ranges.last_mut() {
+            Some(range) if range.end == line.start => range.end = line.total_end,
+            _ => deleted_ranges.push(line.start..line.total_end),
+        }
+    };
     let mut directive_lines = Vec::new();
     let mut stack: Vec<Frame> = Vec::new();
     // 文件内 #define/#undef 只影响本文件（SPEC §1.3 / §4.2）
     let mut macros = macros.clone();
 
-    // 空栈 = true；任一外层未保留即抑制（SPEC §5.3 外层抑制）
+    // keeping 已包含外层抑制，栈顶即可代表当前有效状态；空栈 = true。
     fn all_keeping(stack: &[Frame]) -> bool {
-        stack.iter().all(|f| f.keeping)
+        stack.last().is_none_or(|f| f.keeping)
     }
 
     // Directive 变体 → 指令关键字名（配置管控与错误信息用）
@@ -82,15 +116,21 @@ pub fn process_bytes(
     }
 
     for line in iter_lines(bytes) {
+        // UTF-8 BOM 只在文件起始处作为编码标记；删除仍保持整行粒度。
+        let content = if line.no == 1 {
+            line.content
+                .strip_prefix(b"\xef\xbb\xbf")
+                .unwrap_or(line.content)
+        } else {
+            line.content
+        };
         let dir =
-            classify(line.content, profile, strict).map_err(|e| err(line.no, e.code, e.message))?;
+            classify(content, profile, strict).map_err(|e| err(line.no, e.code, e.message))?;
 
         let dir = match dir {
             None => {
-                if all_keeping(&stack) {
-                    out.extend_from_slice(&bytes[line.start..line.total_end]);
-                } else {
-                    deleted_lines.push(line.no);
+                if !all_keeping(&stack) {
+                    delete(&line);
                 }
                 continue;
             }
@@ -98,7 +138,7 @@ pub fn process_bytes(
         };
 
         // 指令行：先登记删除，再推进状态机（SPEC §6：指令行整行移除）
-        deleted_lines.push(line.no);
+        delete(&line);
         directive_lines.push(line.no);
 
         // 指令级语法管控（E8）：出现即违规，无论分支是否活跃（SPEC §10）
@@ -133,6 +173,13 @@ pub fn process_bytes(
                 let frame = stack
                     .last_mut()
                     .ok_or_else(|| err(line.no, 3, "#elif without matching #if".into()))?;
+                if frame.else_seen {
+                    return Err(err(
+                        line.no,
+                        2,
+                        "#elif after #else in the same block".into(),
+                    ));
+                }
                 if frame.taken {
                     frame.keeping = false; // 已有保留分支，elif 分支不再保留
                 } else if outer {
@@ -213,15 +260,30 @@ pub fn process_bytes(
         ));
     }
 
-    Ok(Outcome {
-        output: out,
+    Ok(Analysis {
         deleted_lines,
         directive_lines,
+        deleted_ranges,
     })
 }
 
+impl Analysis {
+    /// 从同次分析的原始缓冲区批量复制保留段，避免再次逐行扫描。
+    pub fn rewrite(&self, bytes: &[u8]) -> Vec<u8> {
+        let removed: usize = self.deleted_ranges.iter().map(|r| r.len()).sum();
+        let mut output = Vec::with_capacity(bytes.len() - removed);
+        let mut start = 0;
+        for range in &self.deleted_ranges {
+            output.extend_from_slice(&bytes[start..range.start]);
+            start = range.end;
+        }
+        output.extend_from_slice(&bytes[start..]);
+        output
+    }
+}
+
 fn push_frame(stack: &mut Vec<Frame>, cond: bool, open_line: usize) {
-    if stack.iter().all(|f| f.keeping) {
+    if stack.last().is_none_or(|f| f.keeping) {
         // 活跃层：按求值结果保留
         stack.push(Frame {
             taken: cond,

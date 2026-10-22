@@ -18,11 +18,12 @@ CI（`.github/workflows/ci.yml`）：lint job（fmt + clippy）+ test job（ubun
 
 ## 架构速览
 
-数据流：walker（ignore crate 收集文件）→ scanner（行分类/指令识别）→ pipeline（Frame 栈状态机，外层抑制）→ eval（递归下降表达式求值）→ rewriter（unified diff）→ main（rayon 文件级并行 + 聚合输出）。
+数据流：walker（ignore crate 收集文件）→ scanner（行分类/指令识别）→ pipeline（Frame 栈状态机，外层抑制）→ eval（递归下降表达式求值）→ rewriter（unified diff）→ main（rayon 按线程数分批处理 + 确定性输出）。
 
 - Profile（`src/profile.rs`）：c_family `//#`、hash `##`、lua `--#`。
 - 配置（`src/config.rs`）：`.alpp` 发现/解析/宏管控校验，全进程一份只读。
-- 退出码：0 成功；1 IO/用法错误（含配置解析失败）；2 指令校验失败（E1–E8、活跃 `#error`）；3 `--gate` 发现未剥离残留（G1，发布门禁）。
+- 退出码：0 成功；1 IO/用法错误（含配置解析失败）；2 指令校验失败（E1–E8，E6 预留；含活跃 `#error`）；3 `--gate` 发现未剥离残留（G1，发布门禁）。
+- 解析边界：文件首行识别 UTF-8 BOM；同层 else 后的 elif 报 E2；括号与一元 ! 累计嵌套最多 128 层，超限 E7。diff 返回原始字节 `Vec<u8>`。
 - 错误输出：`<文件>:<行>: E<码>: <详情>`；`--gate` 残留为 `<文件>:<行>: G1: ...`；错误超过 50 条折叠为 `alpp: ... and N more errors`。
 
 ## 硬性规范（历史定稿，不要推翻）
@@ -82,6 +83,7 @@ README.md（若影响门面）
 8. Python fixture 缩进块被裁剪后必须仍有语句（`##else` 配 `pass` 或反转条件），行级删除模型的固有限制。
 9. **临时目录名禁止用 `{:?}` 格式化 `SystemTime`**：Debug 输出含冒号，Windows 文件名非法（CI 报 ERROR_INVALID_NAME 267），用 UNIX_EPOCH 纳秒数等纯数字。
 10. **仓库必须保留 `.gitattributes`（`* text=auto eol=lf`）**：GitHub Windows runner 的 `core.autocrlf=true` 会把文本检出转 CRLF，fixtures/golden 被改写后逐字节对比全部失败（实录：lint/ubuntu/macos 全绿仅 windows 红）。新增二进制或行尾敏感资产时补 `**/<pattern> -text`。
+11. **Git 对拍必须显式隔离换行配置**：临时目录不继承仓库 `.gitattributes`，调用 `git -c core.autocrlf=false -c core.eol=lf apply`，不能依赖 runner 的全局 Git 配置。
 
 ## 验证纪律
 

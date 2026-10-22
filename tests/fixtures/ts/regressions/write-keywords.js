@@ -1,0 +1,7 @@
+//#define_X 1
+//#undef_X
+//#if(1)
+//#else_X
+//#endif1
+//#error!
+keep();

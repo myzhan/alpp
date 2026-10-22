@@ -1,0 +1,4 @@
+;#ifdef FLAG
+debug();
+;#endif
+keep();

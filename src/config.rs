@@ -90,6 +90,8 @@ fn name_part(define: &str) -> &str {
 
 /// 从 `start`（目录；文件则取其父目录）向上查找 `.alpp`，找到即停。
 pub fn discover(start: &Path) -> Result<Option<Loaded>, String> {
+    // 先转为绝对路径，避免相对路径的 parent() 在当前目录提前终止。
+    let start = std::path::absolute(start).map_err(|e| e.to_string())?;
     let mut dir = if start.is_file() {
         start
             .parent()
